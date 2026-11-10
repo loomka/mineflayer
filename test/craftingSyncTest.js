@@ -101,3 +101,68 @@ test('public result click with an incompatible cursor does not acquire a result 
   await f.bot.clickWindow(0, 0, 0)
   assert.equal(f.bot._client.listenerCount('end'), 0)
 })
+
+test('a crafting result that trails echoed grid updates is still taken', async () => {
+  const f = fixture()
+  require('../lib/plugins/craft')(f.bot)
+  const sticks = { id: f.item('stick').type, count: 4 }
+  // Paper echoes earlier grid states before the recomputed result.
+  f.slot(0, f.item('oak_button'), 8)
+  let found
+  const pending = f.bot._waitForCraftingResult(f.bot.inventory, sticks).then(value => { found = value })
+  f.slot(0, null, 9)
+  await turn()
+  assert.equal(found, undefined)
+  f.slot(0, f.item('stick', 4), 10)
+  await pending
+  assert.equal(found, true)
+})
+
+test('a crafting result that never arrives is reported, not waited on forever', async () => {
+  const f = fixture()
+  require('../lib/plugins/craft')(f.bot)
+  f.slot(0, f.item('oak_button'), 8)
+  assert.equal(await f.bot._waitForCraftingResult(f.bot.inventory, { id: f.item('stick').type, count: 4 }), false)
+  assert.equal(f.bot.inventory.listenerCount('updateSlot:0'), 0)
+}).timeout(5000)
+
+test('on Paper a click waits for the server to stop echoing slots before the next decision', async () => {
+  const f = fixture()
+  f.bot.game = { serverBrand: 'Paper' }
+  f.slot(9, f.item('oak_planks', 8), 5)
+  const permanentListeners = f.bot._client.listenerCount('set_slot')
+  let settled = false
+  const click = f.bot.clickWindow(9, 0, 0).then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  f.slot(9, null, 6) // Echo of a slot the client already predicted.
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  f.full(7, f.item('oak_planks', 8)) // A trailing full resync restarts the quiet period.
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(settled, false)
+  await click
+  assert.equal(f.bot._client.listenerCount('set_slot'), permanentListeners)
+  assert.equal(f.bot._client.listenerCount('window_items'), permanentListeners)
+  assert.equal(f.bot._client.listenerCount('end'), 0)
+})
+
+test('servers that send only corrections do not wait for echoes', async () => {
+  for (const serverBrand of ['vanilla', 'fabric', undefined]) {
+    const f = fixture()
+    f.bot.game = { serverBrand }
+    f.slot(9, f.item('oak_planks', 8), 5)
+    const started = Date.now()
+    await f.bot.clickWindow(9, 0, 0)
+    assert.ok(Date.now() - started < 20, String(serverBrand))
+  }
+})
+
+test('a Paper click with no echo stops waiting after the first-echo timeout', async () => {
+  const f = fixture()
+  f.bot.game = { serverBrand: 'Paper' }
+  f.slot(9, f.item('oak_planks', 8), 5)
+  const started = Date.now()
+  await f.bot.clickWindow(9, 0, 0)
+  const waited = Date.now() - started
+  assert.ok(waited >= 140 && waited < 400, `waited ${waited} ms`)
+})
